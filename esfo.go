@@ -1,7 +1,6 @@
 package esfo
 
 import (
-    "errors"
     "os"
     "time"
 )
