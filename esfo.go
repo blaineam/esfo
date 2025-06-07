@@ -1,7 +1,6 @@
 package esfo
 
 import (
-    "errors"
     "os"
     "sync"
     "time"
@@ -22,112 +21,123 @@ type DirEntry struct {
     IsDir bool
 }
 
-// wrappedFile wraps an os.File to intercept operations for Swift.
+// wrappedFile stores metadata for Swift file operations.
 type wrappedFile struct {
-    *os.File
-    swiftFD int64 // Swift file descriptor ID
-    name    string
+    file    *os.File // Underlying os.File
+    swiftFD int64    // Swift file descriptor ID
+    name    string   // File name for Swift
 }
 
-// swiftFDMap maps os.File file descriptors to Swift file descriptor IDs.
+// swiftFileMap stores wrappedFile entries for Swift-managed files.
 var (
-    swiftFDMap = make(map[uintptr]int64)
-    nameMap    = make(map[uintptr]string)
-    fdMutex    sync.Mutex
+    swiftFileMap = make(map[uintptr]*wrappedFile)
+    mapMutex     sync.Mutex
 )
 
+// addSwiftFile associates a file with Swift metadata.
+func addSwiftFile(f *os.File, swiftFD int64, name string) {
+    mapMutex.Lock()
+    swiftFileMap[f.Fd()] = &wrappedFile{file: f, swiftFD: swiftFD, name: name}
+    mapMutex.Unlock()
+}
+
+// getSwiftFile retrieves Swift metadata for a file.
+func getSwiftFile(f *os.File) (*wrappedFile, bool) {
+    mapMutex.Lock()
+    wf, ok := swiftFileMap[f.Fd()]
+    mapMutex.Unlock()
+    return wf, ok
+}
+
+// removeSwiftFile removes Swift metadata for a file.
+func removeSwiftFile(f *os.File) {
+    mapMutex.Lock()
+    delete(swiftFileMap, f.Fd())
+    mapMutex.Unlock()
+}
+
 // Write intercepts Write for Swift operations.
-func (f *wrappedFile) Write(data []byte) (int, error) {
+func Write(f *os.File, data []byte) (int, error) {
     if fileSystemHandler != nil {
-        fdMutex.Lock()
-        swiftFD := f.swiftFD
-        fdMutex.Unlock()
-        return fileSystemHandler.Write(swiftFD, data)
+        if wf, ok := getSwiftFile(f); ok {
+            return fileSystemHandler.Write(wf.swiftFD, data)
+        }
     }
-    return f.File.Write(data)
+    return f.Write(data)
 }
 
 // WriteString intercepts WriteString for Swift operations.
-func (f *wrappedFile) WriteString(s string) (int, error) {
-    if fileSystemHandler != nil {
-        return f.Write([]byte(s))
-    }
-    return f.File.WriteString(s)
+func WriteString(f *os.File, s string) (int, error) {
+    return Write(f, []byte(s))
 }
 
 // WriteAt intercepts WriteAt for Swift operations.
-func (f *wrappedFile) WriteAt(data []byte, offset int64) (int, error) {
+func WriteAt(f *os.File, data []byte, offset int64) (int, error) {
     if fileSystemHandler != nil {
-        fdMutex.Lock()
-        swiftFD := f.swiftFD
-        fdMutex.Unlock()
-        return fileSystemHandler.WriteAt(swiftFD, data, offset)
+        if wf, ok := getSwiftFile(f); ok {
+            return fileSystemHandler.WriteAt(wf.swiftFD, data, offset)
+        }
     }
-    return f.File.WriteAt(data, offset)
+    return f.WriteAt(data, offset)
 }
 
 // Read intercepts Read for Swift operations.
-func (f *wrappedFile) Read(data []byte) (int, error) {
+func Read(f *os.File, data []byte) (int, error) {
     if fileSystemHandler != nil {
-        fdMutex.Lock()
-        swiftFD := f.swiftFD
-        fdMutex.Unlock()
-        b, err := fileSystemHandler.Read(swiftFD, len(data))
-        if err != nil {
-            return 0, err
+        if wf, ok := getSwiftFile(f); ok {
+            b, err := fileSystemHandler.Read(wf.swiftFD, len(data))
+            if err != nil {
+                return 0, err
+            }
+            copy(data, b)
+            return len(b), nil
         }
-        copy(data, b)
-        return len(b), nil
     }
-    return f.File.Read(data)
+    return f.Read(data)
 }
 
 // Close intercepts Close for Swift operations.
-func (f *wrappedFile) Close() error {
+func Close(f *os.File) error {
     if fileSystemHandler != nil {
-        fdMutex.Lock()
-        swiftFD := f.swiftFD
-        delete(swiftFDMap, f.Fd())
-        delete(nameMap, f.Fd())
-        fdMutex.Unlock()
-        if err := fileSystemHandler.Close(swiftFD); err != nil {
-            return err
+        if wf, ok := getSwiftFile(f); ok {
+            err := fileSystemHandler.Close(wf.swiftFD)
+            removeSwiftFile(f)
+            if err != nil {
+                return err
+            }
         }
     }
-    return f.File.Close()
+    return f.Close()
 }
 
 // Seek intercepts Seek for Swift operations.
-func (f *wrappedFile) Seek(offset int64, whence int) (int64, error) {
+func Seek(f *os.File, offset int64, whence int) (int64, error) {
     if fileSystemHandler != nil {
-        fdMutex.Lock()
-        swiftFD := f.swiftFD
-        fdMutex.Unlock()
-        return fileSystemHandler.Seek(swiftFD, offset, whence)
+        if wf, ok := getSwiftFile(f); ok {
+            return fileSystemHandler.Seek(wf.swiftFD, offset, whence)
+        }
     }
-    return f.File.Seek(offset, whence)
+    return f.Seek(offset, whence)
 }
 
 // Sync intercepts Sync for Swift operations.
-func (f *wrappedFile) Sync() error {
+func Sync(f *os.File) error {
     if fileSystemHandler != nil {
-        fdMutex.Lock()
-        swiftFD := f.swiftFD
-        fdMutex.Unlock()
-        return fileSystemHandler.Sync(swiftFD)
+        if wf, ok := getSwiftFile(f); ok {
+            return fileSystemHandler.Sync(wf.swiftFD)
+        }
     }
-    return f.File.Sync()
+    return f.Sync()
 }
 
-// Name returns the file name, using the stored name for Swift.
-func (f *wrappedFile) Name() string {
+// Name intercepts Name for Swift operations.
+func Name(f *os.File) string {
     if fileSystemHandler != nil {
-        fdMutex.Lock()
-        name := nameMap[f.Fd()]
-        fdMutex.Unlock()
-        return name
+        if wf, ok := getSwiftFile(f); ok {
+            return wf.name
+        }
     }
-    return f.File.Name()
+    return f.Name()
 }
 
 // FileSystemHandler is the interface implemented by Swift for file operations.
@@ -190,11 +200,8 @@ func OpenFile(name string, flag int, perm os.FileMode) (*os.File, error) {
             fileSystemHandler.Close(fd)
             return nil, err
         }
-        fdMutex.Lock()
-        swiftFDMap[f.Fd()] = fd
-        nameMap[f.Fd()] = name
-        fdMutex.Unlock()
-        return &wrappedFile{File: f, swiftFD: fd, name: name}, nil
+        addSwiftFile(f, fd, name)
+        return f, nil
     }
     return os.OpenFile(name, flag, perm)
 }
@@ -211,11 +218,8 @@ func Create(name string) (*os.File, error) {
             fileSystemHandler.Close(fd)
             return nil, err
         }
-        fdMutex.Lock()
-        swiftFDMap[f.Fd()] = fd
-        nameMap[f.Fd()] = name
-        fdMutex.Unlock()
-        return &wrappedFile{File: f, swiftFD: fd, name: name}, nil
+        addSwiftFile(f, fd, name)
+        return f, nil
     }
     return os.Create(name)
 }
@@ -232,25 +236,18 @@ func CreateTemp(dir, pattern string) (*os.File, error) {
             fileSystemHandler.Close(fd)
             return nil, err
         }
-        fdMutex.Lock()
-        swiftFDMap[f.Fd()] = fd
-        nameMap[f.Fd()] = filename
-        fdMutex.Unlock()
-        return &wrappedFile{File: f, swiftFD: fd, name: filename}, nil
+        addSwiftFile(f, fd, filename)
+        return f, nil
     }
     return os.CreateTemp(dir, pattern)
 }
 
 // Read reads up to count bytes from the file.
-func Read(f *os.File, count int) ([]byte, error) {
+func ReadFileData(f *os.File, count int) ([]byte, error) {
     if fileSystemHandler != nil {
-        fdMutex.Lock()
-        swiftFD, ok := swiftFDMap[f.Fd()]
-        fdMutex.Unlock()
-        if !ok {
-            return nil, errors.New("no Swift file descriptor found")
+        if wf, ok := getSwiftFile(f); ok {
+            return fileSystemHandler.Read(wf.swiftFD, count)
         }
-        return fileSystemHandler.Read(swiftFD, count)
     }
     b := make([]byte, count)
     n, err := f.Read(b)
