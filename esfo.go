@@ -21,34 +21,60 @@ type DirEntry struct {
     IsDir bool
 }
 
-// File represents a file handle for esfo operations.
-type File struct {
+// File is an interface for file operations, implemented by esfo.File and os.File.
+type File interface {
+    Write(p []byte) (int, error)
+    WriteString(s string) (int, error)
+    WriteAt(p []byte, off int64) (int, error)
+    Read(p []byte) (int, error)
+    Close() error
+    Seek(offset int64, whence int) (int64, error)
+    Sync() error
+    Name() string
+    Fd() uintptr
+    // AsOsFile returns the underlying *os.File if available, or nil if not.
+    AsOsFile() *os.File
+}
+
+// esfoFile represents a file handle for esfo operations.
+type esfoFile struct {
     fd   int64  // File descriptor ID for Swift
     name string // File name for compatibility
     file *os.File // Underlying os.File for fallback
 }
 
-// NewFile creates a new File instance with the given os.File and name.
-func NewFile(f *os.File, name string) *File {
-    return &File{
+// NewFile creates a new esfoFile instance with the given os.File and name.
+func NewFile(f *os.File, name string) File {
+    return &esfoFile{
         fd:   int64(f.Fd()),
         name: name,
         file: f,
     }
 }
 
+// NewEsfoFile creates a new esfoFile for Swift operations.
+func NewEsfoFile(fd int64, name string) File {
+    return &esfoFile{
+        fd:   fd,
+        name: name,
+    }
+}
+
 // Fd returns the file descriptor ID.
-func (f *File) Fd() uintptr {
+func (f *esfoFile) Fd() uintptr {
+    if f.file != nil {
+        return f.file.Fd()
+    }
     return uintptr(f.fd)
 }
 
 // Name returns the file name.
-func (f *File) Name() string {
+func (f *esfoFile) Name() string {
     return f.name
 }
 
 // Write writes data to the file descriptor.
-func (f *File) Write(data []byte) (int, error) {
+func (f *esfoFile) Write(data []byte) (int, error) {
     if fileSystemHandler != nil {
         return fileSystemHandler.Write(f.fd, data)
     }
@@ -64,7 +90,7 @@ func (f *File) Write(data []byte) (int, error) {
 }
 
 // WriteString writes a string to the file descriptor.
-func (f *File) WriteString(s string) (int, error) {
+func (f *esfoFile) WriteString(s string) (int, error) {
     if fileSystemHandler != nil {
         return fileSystemHandler.Write(f.fd, []byte(s))
     }
@@ -80,10 +106,9 @@ func (f *File) WriteString(s string) (int, error) {
 }
 
 // WriteAt writes data to the file descriptor at the specified offset.
-func (f *File) WriteAt(data []byte, offset int64) (int, error) {
+func (f *esfoFile) WriteAt(data []byte, offset int64) (int, error) {
     if fileSystemHandler != nil {
-        // Swift handler would need a WriteAt method; not implemented yet
-        return 0, errors.New("WriteAt not implemented in Swift handler")
+        return fileSystemHandler.WriteAt(f.fd, data, offset)
     }
     if f.file != nil {
         return f.file.WriteAt(data, offset)
@@ -96,8 +121,29 @@ func (f *File) WriteAt(data []byte, offset int64) (int, error) {
     return f2.WriteAt(data, offset)
 }
 
+// Read reads data from the file descriptor.
+func (f *esfoFile) Read(data []byte) (int, error) {
+    if fileSystemHandler != nil {
+        b, err := fileSystemHandler.Read(f.fd, len(data))
+        if err != nil {
+            return 0, err
+        }
+        copy(data, b)
+        return len(b), nil
+    }
+    if f.file != nil {
+        return f.file.Read(data)
+    }
+    f2, err := os.Open(f.name)
+    if err != nil {
+        return 0, err
+    }
+    defer f2.Close()
+    return f2.Read(data)
+}
+
 // Close closes the file descriptor.
-func (f *File) Close() error {
+func (f *esfoFile) Close() error {
     if fileSystemHandler != nil {
         return fileSystemHandler.Close(f.fd)
     }
@@ -112,10 +158,9 @@ func (f *File) Close() error {
 }
 
 // Seek sets the offset for the next Read or Write on the file.
-func (f *File) Seek(offset int64, whence int) (int64, error) {
+func (f *esfoFile) Seek(offset int64, whence int) (int64, error) {
     if fileSystemHandler != nil {
-        // Swift handler would need a Seek method; not implemented yet
-        return 0, errors.New("Seek not implemented in Swift handler")
+        return fileSystemHandler.Seek(f.fd, offset, whence)
     }
     if f.file != nil {
         return f.file.Seek(offset, whence)
@@ -129,10 +174,9 @@ func (f *File) Seek(offset int64, whence int) (int64, error) {
 }
 
 // Sync commits the current contents of the file to stable storage.
-func (f *File) Sync() error {
+func (f *esfoFile) Sync() error {
     if fileSystemHandler != nil {
-        // Swift handler would need a Sync method; not implemented yet
-        return errors.New("Sync not implemented in Swift handler")
+        return fileSystemHandler.Sync(f.fd)
     }
     if f.file != nil {
         return f.file.Sync()
@@ -145,6 +189,11 @@ func (f *File) Sync() error {
     return f2.Sync()
 }
 
+// AsOsFile returns the underlying *os.File if available.
+func (f *esfoFile) AsOsFile() *os.File {
+    return f.file
+}
+
 // FileSystemHandler is the interface implemented by Swift for file operations.
 type FileSystemHandler interface {
     WriteFile(filename string, data []byte, perm uint32) error
@@ -154,6 +203,9 @@ type FileSystemHandler interface {
     Close(fd int64) error
     Read(fd int64, count int) ([]byte, error)
     Write(fd int64, data []byte) (int, error)
+    WriteAt(fd int64, data []byte, offset int64) (int, error)
+    Seek(fd int64, offset int64, whence int) (int64, error)
+    Sync(fd int64) error
     Remove(name string) error
     Mkdir(name string, perm uint32) error
     MkdirAll(name string, perm uint32) error
@@ -191,51 +243,58 @@ func ReadFile(filename string) ([]byte, error) {
 }
 
 // OpenFile opens the named file with specified flag and permissions.
-func OpenFile(name string, flag int, perm os.FileMode) (interface{}, error) {
+func OpenFile(name string, flag int, perm os.FileMode) (File, error) {
     if fileSystemHandler != nil {
         fd, err := fileSystemHandler.OpenFile(name, flag, uint32(perm))
         if err != nil {
             return nil, err
         }
-        return &File{fd: fd, name: name}, nil
+        return NewEsfoFile(fd, name), nil
     }
     f, err := os.OpenFile(name, flag, perm)
     if err != nil {
         return nil, err
     }
-    return f, nil
+    return NewFile(f, name), nil
 }
 
 // Create creates or truncates the named file.
-func Create(name string) (interface{}, error) {
+func Create(name string) (File, error) {
     if fileSystemHandler != nil {
         fd, err := fileSystemHandler.Create(name)
         if err != nil {
             return nil, err
         }
-        return &File{fd: fd, name: name}, nil
+        return NewEsfoFile(fd, name), nil
     }
     f, err := os.Create(name)
     if err != nil {
         return nil, err
     }
-    return f, nil
+    return NewFile(f, name), nil
+}
+
+// CreateTemp creates a temporary file in the specified directory with the given pattern.
+func CreateTemp(dir, pattern string) (File, error) {
+    if fileSystemHandler != nil {
+        filename, fd, err := fileSystemHandler.CreateTemp(dir, pattern)
+        if err != nil {
+            return nil, err
+        }
+        return NewEsfoFile(fd, filename), nil
+    }
+    f, err := os.CreateTemp(dir, pattern)
+    if err != nil {
+        return nil, err
+    }
+    return NewFile(f, f.Name()), nil
 }
 
 // Read reads up to count bytes from the file descriptor.
-func Read(f interface{}, count int) ([]byte, error) {
-    if fileSystemHandler != nil {
-        if ef, ok := f.(*File); ok {
-            return fileSystemHandler.Read(ef.fd, count)
-        }
-        return nil, errors.New("invalid file type for Swift handler")
-    }
-    if of, ok := f.(*os.File); ok {
-        b := make([]byte, count)
-        n, err := of.Read(b)
-        return b[:n], err
-    }
-    return nil, errors.New("invalid file type")
+func Read(f File, count int) ([]byte, error) {
+    b := make([]byte, count)
+    n, err := f.Read(b)
+    return b[:n], err
 }
 
 // Remove removes the named file or directory.
@@ -315,22 +374,6 @@ func ReadDir(name string) ([]os.DirEntry, error) {
     return os.ReadDir(name)
 }
 
-// CreateTemp creates a temporary file in the specified directory with the given pattern.
-func CreateTemp(dir, pattern string) (interface{}, error) {
-    if fileSystemHandler != nil {
-        filename, fd, err := fileSystemHandler.CreateTemp(dir, pattern)
-        if err != nil {
-            return nil, err
-        }
-        return &File{fd: fd, name: filename}, nil
-    }
-    f, err := os.CreateTemp(dir, pattern)
-    if err != nil {
-        return nil, err
-    }
-    return f, nil
-}
-
 // RemoveAll removes path and any children it contains.
 func RemoveAll(path string) error {
     if fileSystemHandler != nil {
@@ -367,7 +410,7 @@ type fileInfo struct {
 func (fi *fileInfo) Name() string       { return fi.name }
 func (fi *fileInfo) Size() int64        { return fi.size }
 func (fi *fileInfo) Mode() os.FileMode  { return fi.mode }
-func (fi *fileInfo) ModTime() time.Time { return fi.modTime }
+func (fi *fi *fileInfo) ModTime() time.Time { return fi.modTime }
 func (fi *fileInfo) IsDir() bool        { return fi.isDir }
 func (fi *fileInfo) Sys() interface{}   { return nil }
 
