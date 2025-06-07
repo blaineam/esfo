@@ -20,6 +20,22 @@ type DirEntry struct {
     IsDir bool
 }
 
+// File represents a file handle for esfo operations.
+type File struct {
+    fd   int64  // File descriptor ID for Swift
+    name string // File name for compatibility
+}
+
+// Fd returns the file descriptor ID.
+func (f *File) Fd() uintptr {
+    return uintptr(f.fd)
+}
+
+// Name returns the file name.
+func (f *File) Name() string {
+    return f.name
+}
+
 // FileSystemHandler is the interface implemented by Swift for file operations.
 type FileSystemHandler interface {
     WriteFile(filename string, data []byte, perm uint32) error
@@ -66,53 +82,75 @@ func ReadFile(filename string) ([]byte, error) {
 }
 
 // OpenFile opens the named file with specified flag and permissions.
-func OpenFile(name string, flag int, perm os.FileMode) (*os.File, error) {
+func OpenFile(name string, flag int, perm os.FileMode) (*File, error) {
     if fileSystemHandler != nil {
         fd, err := fileSystemHandler.OpenFile(name, flag, uint32(perm))
         if err != nil {
             return nil, err
         }
-        return &os.File{fd: uintptr(fd)}, nil
+        return &File{fd: fd, name: name}, nil
     }
-    return os.OpenFile(name, flag, perm)
+    f, err := os.OpenFile(name, flag, perm)
+    if err != nil {
+        return nil, err
+    }
+    return &File{fd: int64(f.Fd()), name: name}, nil
 }
 
 // Create creates or truncates the named file.
-func Create(name string) (*os.File, error) {
+func Create(name string) (*File, error) {
     if fileSystemHandler != nil {
         fd, err := fileSystemHandler.Create(name)
         if err != nil {
             return nil, err
         }
-        return &os.File{fd: uintptr(fd)}, nil
+        return &File{fd: fd, name: name}, nil
     }
-    return os.Create(name)
+    f, err := os.Create(name)
+    if err != nil {
+        return nil, err
+    }
+    return &File{fd: int64(f.Fd()), name: name}, nil
 }
 
 // Close closes the file descriptor.
-func Close(fd *os.File) error {
+func Close(f *File) error {
     if fileSystemHandler != nil {
-        return fileSystemHandler.Close(int64(fd.Fd()))
+        return fileSystemHandler.Close(f.fd)
     }
-    return fd.Close()
+    f2, err := os.Open(f.name)
+    if err != nil {
+        return err
+    }
+    return f2.Close()
 }
 
 // Read reads up to count bytes from the file descriptor.
-func Read(fd *os.File, count int) ([]byte, error) {
+func Read(f *File, count int) ([]byte, error) {
     if fileSystemHandler != nil {
-        return fileSystemHandler.Read(int64(fd.Fd()), count)
+        return fileSystemHandler.Read(f.fd, count)
     }
+    f2, err := os.Open(f.name)
+    if err != nil {
+        return nil, err
+    }
+    defer f2.Close()
     b := make([]byte, count)
-    n, err := fd.Read(b)
+    n, err := f2.Read(b)
     return b[:n], err
 }
 
 // Write writes data to the file descriptor.
-func Write(fd *os.File, data []byte) (int, error) {
+func Write(f *File, data []byte) (int, error) {
     if fileSystemHandler != nil {
-        return fileSystemHandler.Write(int64(fd.Fd()), data)
+        return fileSystemHandler.Write(f.fd, data)
     }
-    return fd.Write(data)
+    f2, err := os.OpenFile(f.name, os.O_WRONLY, 0)
+    if err != nil {
+        return 0, err
+    }
+    defer f2.Close()
+    return f2.Write(data)
 }
 
 // Remove removes the named file or directory.
@@ -193,15 +231,19 @@ func ReadDir(name string) ([]os.DirEntry, error) {
 }
 
 // CreateTemp creates a temporary file in the specified directory with the given pattern.
-func CreateTemp(dir, pattern string) (*os.File, error) {
+func CreateTemp(dir, pattern string) (*File, error) {
     if fileSystemHandler != nil {
         filename, fd, err := fileSystemHandler.CreateTemp(dir, pattern)
         if err != nil {
             return nil, err
         }
-        return &os.File{fd: uintptr(fd)}, nil
+        return &File{fd: fd, name: filename}, nil
     }
-    return os.CreateTemp(dir, pattern)
+    f, err := os.CreateTemp(dir, pattern)
+    if err != nil {
+        return nil, err
+    }
+    return &File{fd: int64(f.Fd()), name: f.Name()}, nil
 }
 
 // RemoveAll removes path and any children it contains.
