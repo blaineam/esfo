@@ -1,7 +1,7 @@
 package esfo
 
 import (
-    "os"
+   "os"
     "time"
 )
 
@@ -24,6 +24,7 @@ type DirEntry struct {
 type File struct {
     fd   int64  // File descriptor ID for Swift
     name string // File name for compatibility
+    file *os.File // Underlying os.File for fallback
 }
 
 // Fd returns the file descriptor ID.
@@ -41,6 +42,9 @@ func (f *File) Write(data []byte) (int, error) {
     if fileSystemHandler != nil {
         return fileSystemHandler.Write(f.fd, data)
     }
+    if f.file != nil {
+        return f.file.Write(data)
+    }
     f2, err := os.OpenFile(f.name, os.O_WRONLY, 0)
     if err != nil {
         return 0, err
@@ -54,6 +58,9 @@ func (f *File) WriteString(s string) (int, error) {
     if fileSystemHandler != nil {
         return fileSystemHandler.Write(f.fd, []byte(s))
     }
+    if f.file != nil {
+        return f.file.WriteString(s)
+    }
     f2, err := os.OpenFile(f.name, os.O_WRONLY, 0)
     if err != nil {
         return 0, err
@@ -62,16 +69,70 @@ func (f *File) WriteString(s string) (int, error) {
     return f2.WriteString(s)
 }
 
+// WriteAt writes data to the file descriptor at the specified offset.
+func (f *File) WriteAt(data []byte, offset int64) (int, error) {
+    if fileSystemHandler != nil {
+        // Swift handler would need a WriteAt method; not implemented yet
+        return 0, errors.New("WriteAt not implemented in Swift handler")
+    }
+    if f.file != nil {
+        return f.file.WriteAt(data, offset)
+    }
+    f2, err := os.OpenFile(f.name, os.O_WRONLY, 0)
+    if err != nil {
+        return 0, err
+    }
+    defer f2.Close()
+    return f2.WriteAt(data, offset)
+}
+
 // Close closes the file descriptor.
 func (f *File) Close() error {
     if fileSystemHandler != nil {
         return fileSystemHandler.Close(f.fd)
+    }
+    if f.file != nil {
+        return f.file.Close()
     }
     f2, err := os.Open(f.name)
     if err != nil {
         return err
     }
     return f2.Close()
+}
+
+// Seek sets the offset for the next Read or Write on the file.
+func (f *File) Seek(offset int64, whence int) (int64, error) {
+    if fileSystemHandler != nil {
+        // Swift handler would need a Seek method; not implemented yet
+        return 0, errors.New("Seek not implemented in Swift handler")
+    }
+    if f.file != nil {
+        return f.file.Seek(offset, whence)
+    }
+    f2, err := os.OpenFile(f.name, os.O_RDWR, 0)
+    if err != nil {
+        return 0, err
+    }
+    defer f2.Close()
+    return f2.Seek(offset, whence)
+}
+
+// Sync commits the current contents of the file to stable storage.
+func (f *File) Sync() error {
+    if fileSystemHandler != nil {
+        // Swift handler would need a Sync method; not implemented yet
+        return errors.New("Sync not implemented in Swift handler")
+    }
+    if f.file != nil {
+        return f.file.Sync()
+    }
+    f2, err := os.OpenFile(f.name, os.O_RDWR, 0)
+    if err != nil {
+        return err
+    }
+    defer f2.Close()
+    return f2.Sync()
 }
 
 // FileSystemHandler is the interface implemented by Swift for file operations.
@@ -120,7 +181,7 @@ func ReadFile(filename string) ([]byte, error) {
 }
 
 // OpenFile opens the named file with specified flag and permissions.
-func OpenFile(name string, flag int, perm os.FileMode) (*File, error) {
+func OpenFile(name string, flag int, perm os.FileMode) (interface{}, error) {
     if fileSystemHandler != nil {
         fd, err := fileSystemHandler.OpenFile(name, flag, uint32(perm))
         if err != nil {
@@ -132,11 +193,11 @@ func OpenFile(name string, flag int, perm os.FileMode) (*File, error) {
     if err != nil {
         return nil, err
     }
-    return &File{fd: int64(f.Fd()), name: name}, nil
+    return f, nil
 }
 
 // Create creates or truncates the named file.
-func Create(name string) (*File, error) {
+func Create(name string) (interface{}, error) {
     if fileSystemHandler != nil {
         fd, err := fileSystemHandler.Create(name)
         if err != nil {
@@ -148,22 +209,23 @@ func Create(name string) (*File, error) {
     if err != nil {
         return nil, err
     }
-    return &File{fd: int64(f.Fd()), name: name}, nil
+    return f, nil
 }
 
 // Read reads up to count bytes from the file descriptor.
-func Read(f *File, count int) ([]byte, error) {
+func Read(f interface{}, count int) ([]byte, error) {
     if fileSystemHandler != nil {
-        return fileSystemHandler.Read(f.fd, count)
+        if ef, ok := f.(*File); ok {
+            return fileSystemHandler.Read(ef.fd, count)
+        }
+        return nil, errors.New("invalid file type for Swift handler")
     }
-    f2, err := os.Open(f.name)
-    if err != nil {
-        return nil, err
+    if of, ok := f.(*os.File); ok {
+        b := make([]byte, count)
+        n, err := of.Read(b)
+        return b[:n], err
     }
-    defer f2.Close()
-    b := make([]byte, count)
-    n, err := f2.Read(b)
-    return b[:n], err
+    return nil, errors.New("invalid file type")
 }
 
 // Remove removes the named file or directory.
@@ -244,7 +306,7 @@ func ReadDir(name string) ([]os.DirEntry, error) {
 }
 
 // CreateTemp creates a temporary file in the specified directory with the given pattern.
-func CreateTemp(dir, pattern string) (*File, error) {
+func CreateTemp(dir, pattern string) (interface{}, error) {
     if fileSystemHandler != nil {
         filename, fd, err := fileSystemHandler.CreateTemp(dir, pattern)
         if err != nil {
@@ -256,7 +318,7 @@ func CreateTemp(dir, pattern string) (*File, error) {
     if err != nil {
         return nil, err
     }
-    return &File{fd: int64(f.Fd()), name: f.Name()}, nil
+    return f, nil
 }
 
 // RemoveAll removes path and any children it contains.
@@ -295,7 +357,7 @@ type fileInfo struct {
 func (fi *fileInfo) Name() string       { return fi.name }
 func (fi *fileInfo) Size() int64        { return fi.size }
 func (fi *fileInfo) Mode() os.FileMode  { return fi.mode }
-func (fi *fileInfo) ModTime() time.Time { return fi.modTime }
+func (fi *fi *fileInfo) ModTime() time.Time { return fi.modTime }
 func (fi *fileInfo) IsDir() bool        { return fi.isDir }
 func (fi *fileInfo) Sys() interface{}   { return nil }
 
