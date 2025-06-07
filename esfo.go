@@ -2,7 +2,7 @@ package esfo
 
 import (
     "errors"
-   "os"
+    "os"
     "time"
 )
 
@@ -26,6 +26,15 @@ type File struct {
     fd   int64  // File descriptor ID for Swift
     name string // File name for compatibility
     file *os.File // Underlying os.File for fallback
+}
+
+// NewFile creates a new File instance with the given os.File and name.
+func NewFile(f *os.File, name string) *File {
+    return &File{
+        fd:   int64(f.Fd()),
+        name: name,
+        file: f,
+    }
 }
 
 // Fd returns the file descriptor ID.
