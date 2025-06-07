@@ -36,6 +36,44 @@ func (f *File) Name() string {
     return f.name
 }
 
+// Write writes data to the file descriptor.
+func (f *File) Write(data []byte) (int, error) {
+    if fileSystemHandler != nil {
+        return fileSystemHandler.Write(f.fd, data)
+    }
+    f2, err := os.OpenFile(f.name, os.O_WRONLY, 0)
+    if err != nil {
+        return 0, err
+    }
+    defer f2.Close()
+    return f2.Write(data)
+}
+
+// WriteString writes a string to the file descriptor.
+func (f *File) WriteString(s string) (int, error) {
+    if fileSystemHandler != nil {
+        return fileSystemHandler.Write(f.fd, []byte(s))
+    }
+    f2, err := os.OpenFile(f.name, os.O_WRONLY, 0)
+    if err != nil {
+        return 0, err
+    }
+    defer f2.Close()
+    return f2.WriteString(s)
+}
+
+// Close closes the file descriptor.
+func (f *File) Close() error {
+    if fileSystemHandler != nil {
+        return fileSystemHandler.Close(f.fd)
+    }
+    f2, err := os.Open(f.name)
+    if err != nil {
+        return err
+    }
+    return f2.Close()
+}
+
 // FileSystemHandler is the interface implemented by Swift for file operations.
 type FileSystemHandler interface {
     WriteFile(filename string, data []byte, perm uint32) error
@@ -113,18 +151,6 @@ func Create(name string) (*File, error) {
     return &File{fd: int64(f.Fd()), name: name}, nil
 }
 
-// Close closes the file descriptor.
-func Close(f *File) error {
-    if fileSystemHandler != nil {
-        return fileSystemHandler.Close(f.fd)
-    }
-    f2, err := os.Open(f.name)
-    if err != nil {
-        return err
-    }
-    return f2.Close()
-}
-
 // Read reads up to count bytes from the file descriptor.
 func Read(f *File, count int) ([]byte, error) {
     if fileSystemHandler != nil {
@@ -138,19 +164,6 @@ func Read(f *File, count int) ([]byte, error) {
     b := make([]byte, count)
     n, err := f2.Read(b)
     return b[:n], err
-}
-
-// Write writes data to the file descriptor.
-func Write(f *File, data []byte) (int, error) {
-    if fileSystemHandler != nil {
-        return fileSystemHandler.Write(f.fd, data)
-    }
-    f2, err := os.OpenFile(f.name, os.O_WRONLY, 0)
-    if err != nil {
-        return 0, err
-    }
-    defer f2.Close()
-    return f2.Write(data)
 }
 
 // Remove removes the named file or directory.
