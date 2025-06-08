@@ -6,6 +6,12 @@ import (
     "time"
 )
 
+// TempFileResult bundles CreateTemp results.
+type TempFileResult struct {
+    Filename string
+    Fd       int64
+}
+
 // FileInfo mimics os.FileInfo for GoMobile compatibility.
 type FileInfo struct {
     Name    string
@@ -24,7 +30,7 @@ type DirEntry struct {
 // wrappedFile stores metadata for Swift file operations.
 type wrappedFile struct {
     file    *os.File // Underlying os.File
-    swiftFD int64    // Swift file descriptor ID
+    swiftFD int64    // File descriptor ID
     name    string   // File name for Swift
 }
 
@@ -56,148 +62,225 @@ func removeSwiftFile(f *os.File) {
     mapMutex.Unlock()
 }
 
-// Write intercepts Write for Swift operations.
-func Write(f *os.File, data []byte) (int, error) {
-    if fileSystemHandler != nil {
-        if wf, ok := getSwiftFile(f); ok {
-            return fileSystemHandler.Write(wf.swiftFD, data)
-        }
+// Callback functions for Swift to set.
+var (
+    writeFileCallback  func(filename string, data []byte, perm uint32) error
+    readFileCallback   func(filename string) ([]byte, error)
+    openFileCallback   func(name string, flag int, perm uint32) (int64, error)
+    createCallback     func(name string) (int64, error)
+    closeCallback      func(fd int64) error
+    readCallback       func(fd int64, count int) ([]byte, error)
+    writeCallback      func(fd int64, data []byte) (int, error)
+    writeAtCallback    func(fd int64, data []byte, offset int64) (int, error)
+    seekCallback       func(fd int64, offset int64, whence int) (int64, error)
+    syncCallback       func(fd int64) error
+    removeCallback     func(name string) error
+    mkdirCallback      func(name string, perm uint32) error
+    mkdirAllCallback   func(name string, perm uint32) error
+    statCallback       func(name string) (FileInfo, error)
+    chmodCallback      func(name string, mode uint32) error
+    renameCallback     func(oldpath, newpath string) error
+    readDirCallback    func(name string) ([]DirEntry, error)
+    createTempCallback func(dir, pattern string) (TempFileResult, error)
+    removeAllCallback  func(path string) error
+    readLinkCallback   func(name string) (string, error)
+    mkdirTempCallback  func(dir, pattern string) (string, error)
+)
+
+// SetWriteFileCallback sets the callback for WriteFile.
+func SetWriteFileCallback(filename string, data []byte, perm uint32) error {
+    if writeFileCallback != nil {
+        return writeFileCallback(filename, data, perm)
     }
-    return f.Write(data)
+    return os.ErrInvalid
 }
 
-// WriteString intercepts WriteString for Swift operations.
-func WriteString(f *os.File, s string) (int, error) {
-    return Write(f, []byte(s))
-}
-
-// WriteAt intercepts WriteAt for Swift operations.
-func WriteAt(f *os.File, data []byte, offset int64) (int, error) {
-    if fileSystemHandler != nil {
-        if wf, ok := getSwiftFile(f); ok {
-            return fileSystemHandler.WriteAt(wf.swiftFD, data, offset)
-        }
+// SetReadFileCallback sets the callback for ReadFile.
+func SetReadFileCallback(filename string) ([]byte, error) {
+    if readFileCallback != nil {
+        return readFileCallback(filename)
     }
-    return f.WriteAt(data, offset)
+    return nil, os.ErrInvalid
 }
 
-// Read intercepts Read for Swift operations.
-func Read(f *os.File, data []byte) (int, error) {
-    if fileSystemHandler != nil {
-        if wf, ok := getSwiftFile(f); ok {
-            b, err := fileSystemHandler.Read(wf.swiftFD, len(data))
-            if err != nil {
-                return 0, err
-            }
-            copy(data, b)
-            return len(b), nil
-        }
+// SetOpenFileCallback sets the callback for OpenFile.
+func SetOpenFileCallback(name string, flag int, perm uint32) (int64, error) {
+    if openFileCallback != nil {
+        return openFileCallback(name, flag, perm)
     }
-    return f.Read(data)
+    return 0, os.ErrInvalid
 }
 
-// Close intercepts Close for Swift operations.
-func Close(f *os.File) error {
-    if fileSystemHandler != nil {
-        if wf, ok := getSwiftFile(f); ok {
-            err := fileSystemHandler.Close(wf.swiftFD)
-            removeSwiftFile(f)
-            if err != nil {
-                return err
-            }
-        }
+// SetCreateCallback sets the callback for Create.
+func SetCreateCallback(name string) (int64, error) {
+    if createCallback != nil {
+        return createCallback(name)
     }
-    return f.Close()
+    return 0, os.ErrInvalid
 }
 
-// Seek intercepts Seek for Swift operations.
-func Seek(f *os.File, offset int64, whence int) (int64, error) {
-    if fileSystemHandler != nil {
-        if wf, ok := getSwiftFile(f); ok {
-            return fileSystemHandler.Seek(wf.swiftFD, offset, whence)
-        }
+// SetCloseCallback sets the callback for Close.
+func SetCloseCallback(fd int64) error {
+    if closeCallback != nil {
+        return closeCallback(fd)
     }
-    return f.Seek(offset, whence)
+    return os.ErrInvalid
 }
 
-// Sync intercepts Sync for Swift operations.
-func Sync(f *os.File) error {
-    if fileSystemHandler != nil {
-        if wf, ok := getSwiftFile(f); ok {
-            return fileSystemHandler.Sync(wf.swiftFD)
-        }
+// SetReadCallback sets the callback for Read.
+func SetReadCallback(fd int64, count int) ([]byte, error) {
+    if readCallback != nil {
+        return readCallback(fd, count)
     }
-    return f.Sync()
+    return nil, os.ErrInvalid
 }
 
-// Name intercepts Name for Swift operations.
-func Name(f *os.File) string {
-    if fileSystemHandler != nil {
-        if wf, ok := getSwiftFile(f); ok {
-            return wf.name
-        }
+// SetWriteCallback sets the callback for Write.
+func SetWriteCallback(fd int64, data []byte) (int, error) {
+    if writeCallback != nil {
+        return writeCallback(fd, data)
     }
-    return f.Name()
+    return 0, os.ErrInvalid
 }
 
-// FileSystemHandler is the interface implemented by Swift for file operations.
-type FileSystemHandler interface {
-    WriteFile(filename string, data []byte, perm uint32) error
-    ReadFile(filename string) ([]byte, error)
-    OpenFile(name string, flag int, perm uint32) (int64, error) // Returns file descriptor ID
-    Create(name string) (int64, error)                          // Returns file descriptor ID
-    Close(fd int64) error
-    Read(fd int64, count int) ([]byte, error)
-    Write(fd int64, data []byte) (int, error)
-    WriteAt(fd int64, data []byte, offset int64) (int, error)
-    Seek(fd int64, offset int64, whence int) (int64, error)
-    Sync(fd int64) error
-    Remove(name string) error
-    Mkdir(name string, perm uint32) error
-    MkdirAll(name string, perm uint32) error
-    Stat(name string) (FileInfo, error)
-    Chmod(name string, mode uint32) error
-    Rename(oldpath, newpath string) error
-    ReadDir(name string) ([]DirEntry, error)
-    CreateTemp(dir, pattern string) (string, int64, error) // Returns filename and file descriptor ID
-    RemoveAll(path string) error
-    ReadLink(name string) (string, error)
-    MkdirTemp(dir, pattern string) (string, error) // Returns directory name
+// SetWriteAtCallback sets the callback for WriteAt.
+func SetWriteAtCallback(fd int64, data []byte, offset int64) (int, error) {
+    if writeAtCallback != nil {
+        return writeAtCallback(fd, data, offset)
+    }
+    return 0, os.ErrInvalid
 }
 
-var fileSystemHandler FileSystemHandler
+// SetSeekCallback sets the callback for Seek.
+func SetSeekCallback(fd int64, offset int64, whence int) (int64, error) {
+    if seekCallback != nil {
+        return seekCallback(fd, offset, whence)
+    }
+    return 0, os.ErrInvalid
+}
 
-// SetFileSystemHandler sets the Swift implementation for file operations.
-func SetFileSystemHandler(handler FileSystemHandler) {
-    fileSystemHandler = handler
+// SetSyncCallback sets the callback for Sync.
+func SetSyncCallback(fd int64) error {
+    if syncCallback != nil {
+        return syncCallback(fd)
+    }
+    return os.ErrInvalid
+}
+
+// SetRemoveCallback sets the callback for Remove.
+func SetRemoveCallback(name string) error {
+    if removeCallback != nil {
+        return removeCallback(name)
+    }
+    return os.ErrInvalid
+}
+
+// SetMkdirCallback sets the callback for Mkdir.
+func SetMkdirCallback(name string, perm uint32) error {
+    if mkdirCallback != nil {
+        return mkdirCallback(name, perm)
+    }
+    return os.ErrInvalid
+}
+
+// SetMkdirAllCallback sets the callback for MkdirAll.
+func SetMkdirAllCallback(name string, perm uint32) error {
+    if mkdirAllCallback != nil {
+        return mkdirAllCallback(name, perm)
+    }
+    return os.ErrInvalid
+}
+
+// SetStatCallback sets the callback for Stat.
+func SetStatCallback(name string) (FileInfo, error) {
+    if statCallback != nil {
+        return statCallback(name)
+    }
+    return FileInfo{}, os.ErrInvalid
+}
+
+// SetChmodCallback sets the callback for Chmod.
+func SetChmodCallback(name string, mode uint32) error {
+    if chmodCallback != nil {
+        return chmodCallback(name, mode)
+    }
+    return os.ErrInvalid
+}
+
+// SetRenameCallback sets the callback for Rename.
+func SetRenameCallback(oldpath, newpath string) error {
+    if renameCallback != nil {
+        return renameCallback(oldpath, newpath)
+    }
+    return os.ErrInvalid
+}
+
+// SetReadDirCallback sets the callback for ReadDir.
+func SetReadDirCallback(name string) ([]DirEntry, error) {
+    if readDirCallback != nil {
+        return readDirCallback(name)
+    }
+    return nil, os.ErrInvalid
+}
+
+// SetCreateTempCallback sets the callback for CreateTemp.
+func SetCreateTempCallback(dir, pattern string) (TempFileResult, error) {
+    if createTempCallback != nil {
+        return createTempCallback(dir, pattern)
+    }
+    return TempFileResult{}, os.ErrInvalid
+}
+
+// SetRemoveAllCallback sets the callback for RemoveAll.
+func SetRemoveAllCallback(path string) error {
+    if removeAllCallback != nil {
+        return removeAllCallback(path)
+    }
+    return os.ErrInvalid
+}
+
+// SetReadLinkCallback sets the callback for ReadLink.
+func SetReadLinkCallback(name string) (string, error) {
+    if readLinkCallback != nil {
+        return readLinkCallback(name)
+    }
+    return "", os.ErrInvalid
+}
+
+// SetMkdirTempCallback sets the callback for MkdirTemp.
+func SetMkdirTempCallback(dir, pattern string) (string, error) {
+    if mkdirTempCallback != nil {
+        return mkdirTempCallback(dir, pattern)
+    }
+    return "", os.ErrInvalid
 }
 
 // WriteFile writes data to the named file with the given permissions.
 func WriteFile(filename string, data []byte, perm os.FileMode) error {
-    if fileSystemHandler != nil {
-        return fileSystemHandler.WriteFile(filename, data, uint32(perm))
+    if writeFileCallback != nil {
+        return writeFileCallback(filename, data, uint32(perm))
     }
     return os.WriteFile(filename, data, perm)
 }
 
 // ReadFile reads the named file and returns its contents.
 func ReadFile(filename string) ([]byte, error) {
-    if fileSystemHandler != nil {
-        return fileSystemHandler.ReadFile(filename)
+    if readFileCallback != nil {
+        return readFileCallback(filename)
     }
     return os.ReadFile(filename)
 }
 
 // OpenFile opens the named file with specified flag and permissions.
 func OpenFile(name string, flag int, perm os.FileMode) (*os.File, error) {
-    if fileSystemHandler != nil {
-        fd, err := fileSystemHandler.OpenFile(name, flag, uint32(perm))
+    if openFileCallback != nil {
+        fd, err := openFileCallback(name, flag, uint32(perm))
         if err != nil {
             return nil, err
         }
         f, err := os.OpenFile(name, flag, perm)
         if err != nil {
-            fileSystemHandler.Close(fd)
+            closeCallback(fd)
             return nil, err
         }
         addSwiftFile(f, fd, name)
@@ -208,14 +291,14 @@ func OpenFile(name string, flag int, perm os.FileMode) (*os.File, error) {
 
 // Create creates or truncates the named file.
 func Create(name string) (*os.File, error) {
-    if fileSystemHandler != nil {
-        fd, err := fileSystemHandler.Create(name)
+    if createCallback != nil {
+        fd, err := createCallback(name)
         if err != nil {
             return nil, err
         }
         f, err := os.Create(name)
         if err != nil {
-            fileSystemHandler.Close(fd)
+            closeCallback(fd)
             return nil, err
         }
         addSwiftFile(f, fd, name)
@@ -224,64 +307,103 @@ func Create(name string) (*os.File, error) {
     return os.Create(name)
 }
 
-// CreateTemp creates a temporary file in the specified directory.
-func CreateTemp(dir, pattern string) (*os.File, error) {
-    if fileSystemHandler != nil {
-        filename, fd, err := fileSystemHandler.CreateTemp(dir, pattern)
-        if err != nil {
-            return nil, err
+// Close intercepts Close for Swift operations.
+func Close(f *os.File) error {
+    if closeCallback != nil {
+        if wf, ok := getSwiftFile(f); ok {
+            err := closeCallback(wf.swiftFD)
+            removeSwiftFile(f)
+            if err != nil {
+                return err
+            }
         }
-        f, err := os.OpenFile(filename, os.O_RDWR, 0600)
-        if err != nil {
-            fileSystemHandler.Close(fd)
-            return nil, err
-        }
-        addSwiftFile(f, fd, filename)
-        return f, nil
     }
-    return os.CreateTemp(dir, pattern)
+    return f.Close()
 }
 
-// Read reads up to count bytes from the file.
-func ReadFileData(f *os.File, count int) ([]byte, error) {
-    if fileSystemHandler != nil {
+// Read intercepts Read for Swift operations.
+func Read(f *os.File, data []byte) (int, error) {
+    if readCallback != nil {
         if wf, ok := getSwiftFile(f); ok {
-            return fileSystemHandler.Read(wf.swiftFD, count)
+            b, err := readCallback(wf.swiftFD, len(data))
+            if err != nil {
+                return 0, err
+            }
+            copy(data, b)
+            return len(b), nil
         }
     }
-    b := make([]byte, count)
-    n, err := f.Read(b)
-    return b[:n], err
+    return f.Read(data)
+}
+
+// Write intercepts Write for Swift operations.
+func Write(f *os.File, data []byte) (int, error) {
+    if writeCallback != nil {
+        if wf, ok := getSwiftFile(f); ok {
+            return writeCallback(wf.swiftFD, data)
+        }
+    }
+    return f.Write(data)
+}
+
+// WriteAt intercepts WriteAt for Swift operations.
+func WriteAt(f *os.File, data []byte, offset int64) (int, error) {
+    if writeAtCallback != nil {
+        if wf, ok := getSwiftFile(f); ok {
+            return writeAtCallback(wf.swiftFD, data, offset)
+        }
+    }
+    return f.WriteAt(data, offset)
+}
+
+// Seek intercepts Seek for Swift operations.
+func Seek(f *os.File, offset int64, whence int) (int64, error) {
+    if seekCallback != nil {
+        if wf, ok := getSwiftFile(f); ok {
+            return seekCallback(wf.swiftFD, offset, whence)
+        }
+    }
+    return f.Seek(offset, whence)
+}
+
+// Sync intercepts Sync for Swift operations.
+func Sync(f *os.File) error {
+    if syncCallback != nil {
+        if wf, ok := getSwiftFile(f); ok {
+            return syncCallback(wf.swiftFD)
+        }
+    }
+    return f.Sync()
 }
 
 // Remove removes the named file or directory.
 func Remove(name string) error {
-    if fileSystemHandler != nil {
-        return fileSystemHandler.Remove(name)
+    if removeCallback != nil {
+        return removeCallback(name)
     }
     return os.Remove(name)
 }
 
 // Mkdir creates a directory named path with the specified permissions.
 func Mkdir(name string, perm os.FileMode) error {
-    if fileSystemHandler != nil {
-        return fileSystemHandler.Mkdir(name, uint32(perm))
+    if mkdirCallback != nil {
+        return mkdirCallback(name, uint32(perm))
     }
     return os.Mkdir(name, perm)
 }
 
 // MkdirAll creates a directory named path, along with any necessary parents.
 func MkdirAll(name string, perm os.FileMode) error {
-    if fileSystemHandler != nil {
-        return fileSystemHandler.MkdirAll(name, uint32(perm))
+    if mkdirAllCallback != nil {
+        return mkdirAllCallback(name, uint32(perm))
     }
     return os.MkdirAll(name, perm)
 }
 
 // Stat returns information about the named file or directory.
 func Stat(name string) (os.FileInfo, error) {
-    if fileSystemHandler != nil {
-        fi, err := fileSystemHandler.Stat(name)
+    if statCallback != nil {
+        fi, err := statCallback(name)
         if err != nil {
             return nil, err
         }
@@ -296,26 +418,26 @@ func Stat(name string) (os.FileInfo, error) {
     return os.Stat(name)
 }
 
-// Chmod changes the mode of the named file.
+// Chmod changes the mode of the named file to mode.
 func Chmod(name string, mode os.FileMode) error {
-    if fileSystemHandler != nil {
-        return fileSystemHandler.Chmod(name, uint32(mode))
+    if chmodCallback != nil {
+        return chmodCallback(name, uint32(mode))
     }
     return os.Chmod(name, mode)
 }
 
 // Rename renames (moves) oldpath to newpath.
 func Rename(oldpath, newpath string) error {
-    if fileSystemHandler != nil {
-        return fileSystemHandler.Rename(oldpath, newpath)
+    if renameCallback != nil {
+        return renameCallback(oldpath, newpath)
     }
     return os.Rename(oldpath, newpath)
 }
 
 // ReadDir reads the named directory and returns a list of directory entries.
 func ReadDir(name string) ([]os.DirEntry, error) {
-    if fileSystemHandler != nil {
-        entries, err := fileSystemHandler.ReadDir(name)
+    if readDirCallback != nil {
+        entries, err := readDirCallback(name)
         if err != nil {
             return nil, err
         }
@@ -331,26 +453,44 @@ func ReadDir(name string) ([]os.DirEntry, error) {
     return os.ReadDir(name)
 }
 
+// CreateTemp creates a temporary file in the specified directory.
+func CreateTemp(dir, pattern string) (*os.File, error) {
+    if createTempCallback != nil {
+        result, err := createTempCallback(dir, pattern)
+        if err != nil {
+            return nil, err
+        }
+        f, err := os.OpenFile(result.Filename, os.O_RDWR, 0600)
+        if err != nil {
+            closeCallback(result.Fd)
+            return nil, err
+        }
+        addSwiftFile(f, result.Fd, result.Filename)
+        return f, nil
+    }
+    return os.CreateTemp(dir, pattern)
+}
+
 // RemoveAll removes path and any children it contains.
 func RemoveAll(path string) error {
-    if fileSystemHandler != nil {
-        return fileSystemHandler.RemoveAll(path)
+    if removeAllCallback != nil {
+        return removeAllCallback(path)
     }
     return os.RemoveAll(path)
 }
 
 // ReadLink returns the destination of the named symbolic link.
 func ReadLink(name string) (string, error) {
-    if fileSystemHandler != nil {
-        return fileSystemHandler.ReadLink(name)
+    if readLinkCallback != nil {
+        return readLinkCallback(name)
     }
     return os.Readlink(name)
 }
 
 // MkdirTemp creates a temporary directory in the specified directory.
 func MkdirTemp(dir, pattern string) (string, error) {
-    if fileSystemHandler != nil {
-        return fileSystemHandler.MkdirTemp(dir, pattern)
+    if mkdirTempCallback != nil {
+        return mkdirTempCallback(dir, pattern)
     }
     return os.MkdirTemp(dir, pattern)
 }
@@ -377,9 +517,7 @@ type dirEntry struct {
     isDir bool
 }
 
-func (de *dirEntry) Name() string          { return de.name }
-func (de *dirEntry) IsDir() bool           { return de.isDir }
-func (de *dirEntry) Type() os.FileMode     { if de.isDir { return os.ModeDir } else { return 0 } }
-func (de *dirEntry) Info() (os.FileInfo, error) {
-    return Stat(de.name)
-}
+func (de *dirEntry) Name() string              { return de.name }
+func (de *dirEntry) IsDir() bool               { return de.isDir }
+func (de *dirEntry) Type() os.FileMode         { if de.isDir { return os.ModeDir } else { return 0 } }
+func (de *dirEntry) Info() (os.FileInfo, error) { return Stat(de.name) }
