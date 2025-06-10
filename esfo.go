@@ -375,8 +375,8 @@ type fileInfo struct {
 func (fi *fileInfo) Name() string       { return fi.name }
 func (fi *fileInfo) Size() int64        { return fi.size }
 func (fi *fileInfo) Mode() os.FileMode  { return fi.mode }
-func (fi *fi) ModTime() time.Time       { return fi.modTime }
-func (fi *fi) IsDir() bool              { return fi.isDir }
+func (fi *fileInfo) ModTime() time.Time { return fi.modTime }
+func (fi *fileInfo) IsDir() bool        { return fi.isDir }
 func (fi *fileInfo) Sys() interface{}   { return nil }
 
 // Chmod changes the mode of the named file.
