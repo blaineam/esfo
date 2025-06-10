@@ -6,7 +6,7 @@ import (
     "time"
 )
 
-// FileInfo mimics os.FileInfo for export to Swift.
+// FileInfo is exported to Swift for file metadata.
 type FileInfo struct {
     Name    string
     Size    int64
@@ -15,13 +15,13 @@ type FileInfo struct {
     IsDir   bool
 }
 
-// DirEntry mimics os.DirEntry for export to Swift.
+// DirEntry is exported to Swift for directory entries.
 type DirEntry struct {
     Name  string
     IsDir bool
 }
 
-// TempFileResult bundles CreateTemp results for Swift.
+// TempFileResult is exported to Swift for CreateTemp results.
 type TempFileResult struct {
     Filename string
     Fd       int64
@@ -29,9 +29,9 @@ type TempFileResult struct {
 
 // fileHandle tracks os.File and Swift file descriptor.
 type fileHandle struct {
-    file    *os.File // Go file object
-    swiftFD int64    // Swift file descriptor
-    name    string   // File name
+    file    *os.File
+    swiftFD int64
+    name    string
 }
 
 var (
@@ -41,10 +41,15 @@ var (
 )
 
 // addFileHandle maps a Swift FD to an os.File.
-func addFileHandle(f *os.File, swiftFD int64, name string) {
+func addFileHandle(f *os.File, swiftFD int64, name string) int64 {
     handleMutex.Lock()
+    if swiftFD == 0 {
+        swiftFD = nextHandle
+        nextHandle++
+    }
     fileHandles[swiftFD] = &fileHandle{file: f, swiftFD: swiftFD, name: name}
     handleMutex.Unlock()
+    return swiftFD
 }
 
 // getFileHandle retrieves os.File for a Swift FD.
@@ -56,10 +61,17 @@ func getFileHandle(swiftFD int64) (*fileHandle, bool) {
 }
 
 // removeFileHandle removes a file handle.
-func removeFileHandle(swiftFD int64) {
+func removeFileHandle(swiftFD int64) *os.File {
     handleMutex.Lock()
-    delete(fileHandles, swiftFD)
+    fh, ok := fileHandles[swiftFD]
+    if ok {
+        delete(fileHandles, swiftFD)
+    }
     handleMutex.Unlock()
+    if ok {
+        return fh.file
+    }
+    return nil
 }
 
 // Callbacks for Swift to implement.
@@ -192,18 +204,6 @@ func SetMkdirTempCallback(cb func(dir, pattern string) (string, error)) {
     mkdirTempCallback = cb
 }
 
-// File is a wrapper for os.File to satisfy os.FileInfo interface.
-type File struct {
-    *os.File
-    swiftFD int64
-    name    string
-}
-
-// Stat returns file info for the wrapped file.
-func (f *File) Stat() (os.FileInfo, error) {
-    return f.File.Stat()
-}
-
 // WriteFile writes data to the named file.
 func WriteFile(filename string, data []byte, perm os.FileMode) error {
     if writeFileCallback != nil {
@@ -220,30 +220,25 @@ func ReadFile(filename string) ([]byte, error) {
     return os.ReadFile(filename)
 }
 
-// OpenFile opens the named file with specified flag and perm.
-func OpenFile(name string, flag int, perm os.FileMode) (*File, error) {
+// OpenFile opens the named file.
+func OpenFile(name string, flag int, perm os.FileMode) (*os.File, error) {
     if openFileCallback != nil {
         swiftFD, err := openFileCallback(name, flag, uint32(perm))
         if err != nil {
             return nil, err
         }
-        // Create a temporary os.File for Go compatibility
         f, err := os.OpenFile(name, flag, perm)
         if err != nil {
             return nil, err
         }
         addFileHandle(f, swiftFD, name)
-        return &File{File: f, swiftFD: swiftFD, name: name}, nil
+        return f, nil
     }
-    f, err := os.OpenFile(name, flag, perm)
-    if err != nil {
-        return nil, err
-    }
-    return &File{File: f, swiftFD: 0, name: name}, nil
+    return os.OpenFile(name, flag, perm)
 }
 
 // Create creates or truncates the named file.
-func Create(name string) (*File, error) {
+func Create(name string) (*os.File, error) {
     if createCallback != nil {
         swiftFD, err := createCallback(name)
         if err != nil {
@@ -254,71 +249,126 @@ func Create(name string) (*File, error) {
             return nil, err
         }
         addFileHandle(f, swiftFD, name)
-        return &File{File: f, swiftFD: swiftFD, name: name}, nil
+        return f, nil
     }
-    f, err := os.Create(name)
-    if err != nil {
-        return nil, err
-    }
-    return &File{File: f, swiftFD: 0, name: name}, nil
+    return os.Create(name)
 }
 
 // Close closes the file.
-func Close(f *File) error {
-    if closeCallback != nil && f.swiftFD != 0 {
-        err := closeCallback(f.swiftFD)
-        if err != nil {
-            return err
+func Close(f *os.File) error {
+    if closeCallback != nil {
+        fh, ok := getFileHandle(0)
+        for _, h := range fileHandles {
+            if h.file == f {
+                fh = h
+                ok = true
+                break
+            }
         }
-        removeFileHandle(f.swiftFD)
-        return f.File.Close()
+        if ok && fh.swiftFD != 0 {
+            err := closeCallback(fh.swiftFD)
+            if err != nil {
+                return err
+            }
+            removeFileHandle(fh.swiftFD)
+        }
     }
-    return f.File.Close()
+    return f.Close()
 }
 
 // Read reads up to len(b) bytes from the file.
-func (f *File) Read(b []byte) (int, error) {
-    if readCallback != nil && f.swiftFD != 0 {
-        data, err := readCallback(f.swiftFD, len(b))
-        if err != nil {
-            return 0, err
+func Read(f *os.File, b []byte) (int, error) {
+    if readCallback != nil {
+        fh, ok := getFileHandle(0)
+        for _, h := range fileHandles {
+            if h.file == f {
+                fh = h
+                ok = true
+                break
+            }
         }
-        n := copy(b, data)
-        return n, nil
+        if ok && fh.swiftFD != 0 {
+            data, err := readCallback(fh.swiftFD, len(b))
+            if err != nil {
+                return 0, err
+            }
+            n := copy(b, data)
+            return n, nil
+        }
     }
-    return f.File.Read(b)
+    return f.Read(b)
 }
 
 // Write writes len(b) bytes to the file.
-func (f *File) Write(b []byte) (int, error) {
-    if writeCallback != nil && f.swiftFD != 0 {
-        return writeCallback(f.swiftFD, b)
+func Write(f *os.File, b []byte) (int, error) {
+    if writeCallback != nil {
+        fh, ok := getFileHandle(0)
+        for _, h := range fileHandles {
+            if h.file == f {
+                fh = h
+                ok = true
+                break
+            }
+        }
+        if ok && fh.swiftFD != 0 {
+            return writeCallback(fh.swiftFD, b)
+        }
     }
-    return f.File.Write(b)
+    return f.Write(b)
 }
 
 // WriteAt writes len(b) bytes to the file at offset.
-func (f *File) WriteAt(b []byte, off int64) (int, error) {
-    if writeAtCallback != nil && f.swiftFD != 0 {
-        return writeAtCallback(f.swiftFD, b, off)
+func WriteAt(f *os.File, b []byte, off int64) (int, error) {
+    if writeAtCallback != nil {
+        fh, ok := getFileHandle(0)
+        for _, h := range fileHandles {
+            if h.file == f {
+                fh = h
+                ok = true
+                break
+            }
+        }
+        if ok && fh.swiftFD != 0 {
+            return writeAtCallback(fh.swiftFD, b, off)
+        }
     }
-    return f.File.WriteAt(b, off)
+    return f.WriteAt(b, off)
 }
 
 // Seek sets the offset for the next Read or Write.
-func (f *File) Seek(offset int64, whence int) (int64, error) {
-    if seekCallback != nil && f.swiftFD != 0 {
-        return seekCallback(f.swiftFD, offset, whence)
+func Seek(f *os.File, offset int64, whence int) (int64, error) {
+    if seekCallback != nil {
+        fh, ok := getFileHandle(0)
+        for _, h := range fileHandles {
+            if h.file == f {
+                fh = h
+                ok = true
+                break
+            }
+        }
+        if ok && fh.swiftFD != 0 {
+            return seekCallback(fh.swiftFD, offset, whence)
+        }
     }
-    return f.File.Seek(offset, whence)
+    return f.Seek(offset, whence)
 }
 
 // Sync commits the file's contents to stable storage.
-func (f *File) Sync() error {
-    if syncCallback != nil && f.swiftFD != 0 {
-        return syncCallback(f.swiftFD)
+func Sync(f *os.File) error {
+    if syncCallback != nil {
+        fh, ok := getFileHandle(0)
+        for _, h := range fileHandles {
+            if h.file == f {
+                fh = h
+                ok = true
+                break
+            }
+        }
+        if ok && fh.swiftFD != 0 {
+            return syncCallback(fh.swiftFD)
+        }
     }
-    return f.File.Sync()
+    return f.Sync()
 }
 
 // Remove removes the named file or directory.
@@ -377,7 +427,7 @@ func (fi *fileInfo) Size() int64        { return fi.size }
 func (fi *fileInfo) Mode() os.FileMode  { return fi.mode }
 func (fi *fileInfo) ModTime() time.Time { return fi.modTime }
 func (fi *fileInfo) IsDir() bool        { return fi.isDir }
-func (fi *fileInfo) Sys() interface{}   { return nil }
+func (fi *fileInfo) Sys() interface{}  { return nil }
 
 // Chmod changes the mode of the named file.
 func Chmod(name string, mode os.FileMode) error {
@@ -423,7 +473,7 @@ func (d *dirEntry) Type() os.FileMode          { return 0 }
 func (d *dirEntry) Info() (os.FileInfo, error) { return nil, nil }
 
 // CreateTemp creates a temporary file.
-func CreateTemp(dir, pattern string) (*File, error) {
+func CreateTemp(dir, pattern string) (*os.File, error) {
     if createTempCallback != nil {
         result, err := createTempCallback(dir, pattern)
         if err != nil {
@@ -434,13 +484,9 @@ func CreateTemp(dir, pattern string) (*File, error) {
             return nil, err
         }
         addFileHandle(f, result.Fd, result.Filename)
-        return &File{File: f, swiftFD: result.Fd, name: result.Filename}, nil
+        return f, nil
     }
-    f, err := os.CreateTemp(dir, pattern)
-    if err != nil {
-        return nil, err
-    }
-    return &File{File: f, swiftFD: 0, name: f.Name()}, nil
+    return os.CreateTemp(dir, pattern)
 }
 
 // RemoveAll removes path and its children.
